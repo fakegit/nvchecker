@@ -1,6 +1,6 @@
 # vim: se sw=2:
 # MIT licensed
-# Copyright (c) 2018 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2018-2020,2023-2024 lilydjwg <lilydjwg@gmail.com>, et al.
 
 import logging
 import os
@@ -26,17 +26,37 @@ def _console_msg(event):
   else:
     msg = evt
 
+  if 'revision' in event and not event['revision']:
+      del event['revision']
+
   if 'name' in event:
     msg = f"{event['name']}: {msg}"
     del event['name']
 
   event['msg'] = msg
 
+  if rich_result := event.get('rich_result'):
+    if changelog_url := rich_result.get('changelog_url'):
+        event['changelog_url'] = changelog_url
+
+    del event['rich_result']
+
   return event
 
 def exc_info(logger, level, event):
   if level == 'exception':
     event['exc_info'] = True
+  return event
+
+def filter_nones(logger, level, event):
+  if 'url' in event and event['url'] is None:
+    del event['url']
+  return event
+
+def filter_taskname(logger, level, event):
+  # added in Python 3.12, not useful to us, but appears as a normal KV.
+  if 'taskName' in event:
+    del event['taskName']
   return event
 
 def filter_exc(logger, level, event):

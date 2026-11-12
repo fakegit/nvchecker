@@ -1,17 +1,16 @@
 # MIT licensed
 # Copyright (c) 2020 Felix Yan <felixonmars@archlinux.org>, et al.
 
-import urllib.parse
-
-import structlog
-
 from nvchecker.api import (
-  VersionResult, Entry, AsyncCache, KeyManager,
+  VersionResult, RichResult, Entry, AsyncCache, KeyManager,
 )
 
-PAGURE_URL = 'https://%s/api/0/%s/git/tags'
+import logging
 
-logger = structlog.get_logger(logger_name=__name__)
+logger = logging.getLogger(__name__)
+logger.warning('Pagure was sunset in 2026')
+
+PAGURE_URL = 'https://%s/api/0/%s/git/tags?with_commits=true'
 
 async def get_version(
   name: str, conf: Entry, *,
@@ -24,5 +23,9 @@ async def get_version(
   url = PAGURE_URL % (host, repo)
 
   data = await cache.get_json(url)
-  version = data["tags"]
-  return version
+  return [
+    RichResult(
+      version = version,
+      url = f'https://{host}/{repo}/tree/{version_hash}',
+    ) for version, version_hash in data["tags"].items()
+  ]

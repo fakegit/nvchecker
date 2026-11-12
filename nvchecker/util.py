@@ -3,18 +3,29 @@
 
 from __future__ import annotations
 
+import sys
 import asyncio
 from asyncio import Queue
 from typing import (
   Dict, Optional, List, NamedTuple, Union,
   Any, Tuple, Callable, Coroutine, Hashable,
-  TYPE_CHECKING,
+  TYPE_CHECKING, TypeVar,
 )
 from pathlib import Path
 import contextvars
 import abc
+import netrc
+from dataclasses import dataclass
+import re
 
-import toml
+if TYPE_CHECKING:
+  import tomli as tomllib
+else:
+  try:
+    import tomllib
+  except ModuleNotFoundError:
+    import tomli as tomllib
+
 import structlog
 
 from .httpclient import session
@@ -29,15 +40,64 @@ logger = structlog.get_logger(logger_name=__name__)
 Entry = Dict[str, Any]
 Entry.__doc__ = '''The configuration `dict` for an entry.'''
 Entries = Dict[str, Entry]
-VersData = Dict[str, str]
-VersionResult = Union[None, str, List[str], Exception]
-VersionResult.__doc__ = '''The result of a `get_version` check.
 
-* `None` - No version found.
-* `str` - A single version string is found.
-* `List[str]` - Multiple version strings are found. :ref:`list options` will be applied.
-* `Exception` - An error occurred.
-'''
+if sys.version_info[:2] >= (3, 11):
+  from typing import LiteralString
+else:
+  LiteralString = str
+
+T = TypeVar('T')
+
+if sys.version_info[:2] >= (3, 10):
+  @dataclass(kw_only=True)
+  class RichResult:
+    version: str
+    gitref: Optional[str] = None
+    revision: Optional[str] = None
+    url: Optional[str] = None
+    changelog_url: Optional[str] = None
+    # Creation/publication time of the selected version object, if applicable.
+    creation_time: Optional[str] = None
+    # Creation time of the underlying revision object, if applicable.
+    revision_creation_time: Optional[str] = None
+
+    def __str__(self):
+      return self.version
+else:
+  @dataclass
+  class RichResult:
+    version: str
+    gitref: Optional[str] = None
+    revision: Optional[str] = None
+    url: Optional[str] = None
+    changelog_url: Optional[str] = None
+    # Creation/publication time of the selected version object, if applicable.
+    creation_time: Optional[str] = None
+    # Creation time of the underlying revision object, if applicable.
+    revision_creation_time: Optional[str] = None
+
+    def __str__(self):
+      return self.version
+
+# The result of a `get_version` check.
+# 
+# * `None` - No version found.
+# * `str` - A single version string is found.
+# * `RichResult` - A version string with additional information.
+# * `List[str]` - Multiple version strings. :ref:`list options` will be applied.
+# * `List[RichResult]` - Multiple version strings with additional information are found. :ref:`list options` will be applied.
+# * `Exception` - An error occurred.
+VersionResult = Union[None, str, RichResult, List[str], List[RichResult], Exception]
+
+def apply_regex_match(
+  regex: re.Pattern,
+  versions: Union[List[str], List[RichResult]],
+  cond: bool,
+) -> Union[List[str], List[RichResult]]:
+  if isinstance(versions[0], RichResult):
+    return [x for x in versions if bool(regex.fullmatch(str(x))) == cond]
+  else:
+    return [x for x in versions if bool(regex.fullmatch(x)) == cond]
 
 class FileLoadError(Exception):
   def __init__(self, kind, filename, exc):
@@ -55,17 +115,25 @@ class KeyManager:
   ) -> None:
     if file is not None:
       try:
-        with file.open() as f:
-          keys = toml.load(f)['keys']
-      except (OSError, toml.TomlDecodeError) as e:
+        with file.open('rb') as f:
+          keys = tomllib.load(f)['keys']
+      except (OSError, tomllib.TOMLDecodeError) as e:
         raise FileLoadError('keyfile', str(file), e)
     else:
       keys = {}
     self.keys = keys
+    try:
+      netrc_file = netrc.netrc()
+      netrc_hosts = netrc_file.hosts
+    except (FileNotFoundError, netrc.NetrcParseError):
+      netrc_hosts = {}
+    self.netrc = netrc_hosts
 
-  def get_key(self, name: str) -> Optional[str]:
+  def get_key(self, name: str, legacy_name: Optional[str] = None) -> Optional[str]:
     '''Get the named key (token) in the keyfile.'''
-    return self.keys.get(name)
+    keyfile_token = self.keys.get(name) or self.keys.get(legacy_name)
+    netrc_passwd = (e := self.netrc.get(name)) and e[2]
+    return keyfile_token or netrc_passwd
 
 class EntryWaiter:
   def __init__(self) -> None:
@@ -81,13 +149,17 @@ class EntryWaiter:
 
   def set_result(self, name: str, value: str) -> None:
     fu = self._waiting.get(name)
-    if fu is not None:
-      fu.set_result(value)
+    if fu is None:
+      fu = asyncio.Future()
+      self._waiting[name] = fu
+    fu.set_result(value)
 
   def set_exception(self, name: str, e: Exception) -> None:
     fu = self._waiting.get(name)
-    if fu is not None:
-      fu.set_exception(e)
+    if fu is None:
+      fu = asyncio.Future()
+      self._waiting[name] = fu
+    fu.set_exception(e)
 
 class RawResult(NamedTuple):
   '''The unprocessed result from a check.'''
@@ -99,10 +171,7 @@ RawResult.name.__doc__ = 'The name (table name) of the entry.'
 RawResult.version.__doc__ = 'The result from the check.'
 RawResult.conf.__doc__ = 'The entry configuration (table content) of the entry.'
 
-class Result(NamedTuple):
-  name: str
-  version: str
-  conf: Entry
+ResultData = Dict[str, RichResult]
 
 class BaseWorker:
   '''The base class for defining `Worker` classes for source plugins.
@@ -146,6 +215,13 @@ class BaseWorker:
     '''Run the `tasks`. Subclasses should implement this method.'''
     raise NotImplementedError
 
+  async def _run_maynot_raise(self) -> None:
+    try:
+      await self.run()
+    except Exception:
+      # don't let an exception tear down the whole process
+      logger.exception('exception raised by Worker.run')
+
 class AsyncCache:
   '''A cache for use with async functions.'''
   cache: Dict[Hashable, Any]
@@ -177,29 +253,39 @@ class AsyncCache:
   async def get(
     self,
     key: Hashable,
-    func: Callable[[Hashable], Coroutine[Any, Any, Any]],
-  ) -> Any:
+    func: Callable[[Hashable], Coroutine[None, None, T]],
+  ) -> T:
     '''Run async ``func`` and cache its return value by ``key``.
 
     The ``key`` should be hashable, and the function will be called with it as
     its sole argument. For multiple simultaneous calls with the same key, only
     one will actually be called, and others will wait and return the same
-    (cached) value.
+    (cached) value. The cache is additionally partitioned by the current
+    request context.
     '''
+    cache_key = (
+      key,
+      ctx_tries.get(),
+      ctx_proxy.get(),
+      ctx_ua.get(),
+      ctx_httpt.get(),
+      ctx_verify_cert.get(),
+    )
+
     async with self.lock:
-      cached = self.cache.get(key)
+      cached = self.cache.get(cache_key)
       if cached is None:
         coro = func(key)
         fu = asyncio.create_task(coro)
-        self.cache[key] = fu
+        self.cache[cache_key] = fu
 
     if asyncio.isfuture(cached): # pending
-      return await cached # type: ignore
+      return await cached
     elif cached is not None: # cached
       return cached
     else: # not cached
       r = await fu
-      self.cache[key] = r
+      self.cache[cache_key] = r
       return r
 
 if TYPE_CHECKING:
@@ -276,6 +362,6 @@ class GetVersionError(Exception):
   :param msg: The error message.
   :param kwargs: Arbitrary additional context for the error.
   '''
-  def __init__(self, msg: str, **kwargs: Any) -> None:
+  def __init__(self, msg: LiteralString, **kwargs: Any) -> None:
     self.msg = msg
     self.kwargs = kwargs

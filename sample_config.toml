@@ -2,11 +2,6 @@
 oldver = "old_ver.json"
 newver = "new_ver.json"
 
-[vim]
-source = "regex"
-regex = "7\\.3\\.\\d+"
-url = "http://ftp.vim.org/pub/vim/patches/7.3/"
-
 [google-chrome]
 source = "cmd"
 cmd = '''wget -qO- http://dl.google.com/linux/chrome/rpm/stable/x86_64/repodata/other.xml.gz | zgrep -A1 "google-chrome-stable" | awk -F\" '/version/ {print $4"-"$6}' '''
@@ -22,20 +17,24 @@ github = "lilydjwg/winterpy"
 source = "github"
 github = "lilydjwg/nvchecker"
 
+[gitlab-test-pygit2]
+source = "git_pygit2"
+git = "https://gitlab.com/gitlab-org/gitlab-test.git"
+
+[gitlab-test-dulwich]
+source = "git_dulwich"
+git = "https://gitlab.com/gitlab-org/gitlab-test.git"
+
 [ssed]
 source = "regex"
 regex = "The current version is ([\\d.]+)\\."
-url = "http://sed.sourceforge.net/grabbag/ssed/"
+url = "https://sed.sourceforge.net/grabbag/ssed/"
 proxy = "http://localhost:8087"
 
 [PySide]
 source = "pypi"
-pypi = "PySide"
+pypi = "nvchecker"
 
 [test]
 source = "manual"
 manual = "0.1"
-
-["Sparkle Test App"]
-source = "sparkle"
-sparkle = "https://sparkle-project.org/files/sparkletestcast.xml"

@@ -6,14 +6,12 @@ import urllib.parse
 import structlog
 
 from nvchecker.api import (
-  VersionResult, Entry, AsyncCache, KeyManager,
-  TemporaryError,
+  VersionResult, RichResult, Entry,
+  AsyncCache, KeyManager, TemporaryError,
 )
 
 GITLAB_URL = 'https://%s/api/v4/projects/%s/repository/commits'
 GITLAB_MAX_TAG = 'https://%s/api/v4/projects/%s/repository/tags'
-
-logger = structlog.get_logger(logger_name=__name__)
 
 async def get_version(name, conf, **kwargs):
   try:
@@ -42,8 +40,7 @@ async def get_version_real(
   token = conf.get('token')
   # Load token from keyman
   if token is None:
-    key_name = 'gitlab_' + host.lower()
-    token = keymanager.get_key(key_name)
+    token = keymanager.get_key(host.lower(), 'gitlab_' + host.lower())
 
   # Set private token if token exists.
   headers = {}
@@ -52,21 +49,34 @@ async def get_version_real(
 
   data = await cache.get_json(url, headers = headers)
   if use_max_tag:
-    version = [tag["name"] for tag in data]
+    return [
+      RichResult(
+        version = tag['name'],
+        gitref = f"refs/tags/{tag['name']}",
+        revision = tag['commit']['id'],
+        url = f'https://{host}/{conf["gitlab"]}/-/tags/{tag["name"]}',
+        creation_time = tag.get('created_at'),
+        revision_creation_time = tag['commit'].get('created_at'),
+      ) for tag in data
+    ]
   else:
-    version = data[0]['created_at'].split('T', 1)[0].replace('-', '')
-  return version
+    return RichResult(
+      version = data[0]['created_at'].split('T', 1)[0].replace('-', ''),
+      revision = data[0]['id'],
+      url = data[0]['web_url'],
+      revision_creation_time = data[0]['created_at'],
+    )
 
 def check_ratelimit(exc, name):
   res = exc.response
   if not res:
     raise
 
+  logger = structlog.get_logger(logger_name=__name__, name=name)
   # default -1 is used to re-raise the exception
   n = int(res.headers.get('RateLimit-Remaining', -1))
   if n == 0:
     logger.error('gitlab rate limited. Wait some time '
-                 'or get an API token to increase the allowance if not yet',
-                 name = name)
+                 'or get an API token to increase the allowance if not yet')
   else:
     raise

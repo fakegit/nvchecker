@@ -23,11 +23,12 @@ This is the version 2.0 branch. For the old version 1.x, please switch to the ``
 
 Dependency
 ----------
-- Python 3.7+
-- Python library: structlog, toml, appdirs
+- Python 3.9+
+- Python library: structlog, platformdirs, tomli (on Python < 3.11)
 - One of these Python library combinations (ordered by preference):
 
   * tornado + pycurl
+  * httpx2 with http2 support
   * aiohttp
   * httpx with http2 support (experimental; only latest version is supported)
   * tornado
@@ -42,7 +43,7 @@ To install::
 
 To use the latest code, you can also clone this repository and run::
 
-  python3 setup.py install
+  pip install .
 
 To see available options::
 

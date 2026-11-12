@@ -1,12 +1,12 @@
 # MIT licensed
-# Copyright (c) 2013-2020 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2013-2020,2024 lilydjwg <lilydjwg@gmail.com>, et al.
 
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 from typing import Iterable, Dict, List, Tuple, Any, Optional
 
 from nvchecker.api import (
-  session, GetVersionError, VersionResult,
+  session, GetVersionError, VersionResult, RichResult,
   Entry, BaseWorker, RawResult,
 )
 
@@ -95,11 +95,15 @@ async def _run_batch_impl(
 
     version = result['Version']
     if use_last_modified:
-      version += '-' + datetime.utcfromtimestamp(result['LastModified']).strftime('%Y%m%d%H%M%S')
+      dt = datetime.fromtimestamp(result['LastModified'], timezone.utc)
+      version += '-' + dt.strftime('%Y%m%d%H%M%S')
     if strip_release and '-' in version:
       version = version.rsplit('-', 1)[0]
 
-    ret[name] = version
+    ret[name] = RichResult(
+      version = version,
+      url = f'https://aur.archlinux.org/packages/{aurname}',
+    )
 
   return ret
 

@@ -1,9 +1,15 @@
 # MIT licensed
-# Copyright (c) 2013-2021 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2013-2021,2023-2024 lilydjwg <lilydjwg@gmail.com>, et al.
 
-from packaging.version import Version
+import structlog
+from packaging.version import Version, InvalidVersion
+
+from nvchecker.api import RichResult
 
 async def get_version(name, conf, *, cache, **kwargs):
+  logger = structlog.get_logger(logger_name=__name__, name=name)
+  ret = []
+
   package = conf.get('pypi') or name
   use_pre_release = conf.get('use_pre_release', False)
 
@@ -11,11 +17,45 @@ async def get_version(name, conf, *, cache, **kwargs):
 
   data = await cache.get_json(url)
 
-  if use_pre_release:
-    version = sorted(
-      data['releases'].keys(),
-      key = Version,
-    )[-1]
-  else:
-    version = data['info']['version']
-  return version
+  for version in data['releases'].keys():
+    # Skip versions that are marked as yanked.
+    if (vers := data['releases'][version]) and vers[0]['yanked']:
+      continue
+
+    try:
+      parsed_version = Version(version)
+    except InvalidVersion:
+      if data['releases'][version]:
+        # emit a warning if there is something under the invalid version
+        # sympy has an empty "0.5.13-hg" version
+        logger.warning('ignoring invalid version', version=version)
+      continue
+
+    if not use_pre_release and parsed_version.is_prerelease:
+      continue
+
+    creation_time = min(
+      (
+        release_file['upload_time_iso_8601']
+        for release_file in vers
+        if release_file.get('upload_time_iso_8601') is not None
+      ),
+      default = None,
+    )
+
+    if urls := data['info']['project_urls']:
+      changelog_url = next(
+        (value for key, value in urls.items() if key.lower().startswith(('change', 'release'))),
+        None
+      )
+    else:
+      changelog_url = None
+
+    ret.append(RichResult(
+      version = version,
+      url = f'https://pypi.org/project/{package}/{version}/',
+      creation_time = creation_time,
+      changelog_url = changelog_url,
+    ))
+
+  return ret

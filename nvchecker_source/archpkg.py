@@ -1,9 +1,9 @@
 # MIT licensed
 # Copyright (c) 2013-2020 lilydjwg <lilydjwg@gmail.com>, et al.
 
-from nvchecker.api import session, GetVersionError
+from nvchecker.api import session, RichResult, GetVersionError
 
-URL = 'https://www.archlinux.org/packages/search/json/'
+URL = 'https://archlinux.org/packages/search/json/'
 
 async def request(pkg):
   res = await session.get(URL, params={"name": pkg})
@@ -31,4 +31,7 @@ async def get_version(name, conf, *, cache, **kwargs):
   else:
     version = r['pkgver'] + '-' + r['pkgrel']
 
-  return version
+  return RichResult(
+    version = version,
+    url = f'https://archlinux.org/packages/{r["repo"]}/{r["arch"]}/{r["pkgname"]}/',
+  )

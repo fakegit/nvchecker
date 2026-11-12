@@ -1,0 +1,51 @@
+#!/bin/bash -e
+
+mitmdump=${mitmdump:-mitmdump}
+
+# geo.mirror.pkgbuild.com is hit directly by pacman (tests/test_alpmfiles.py)
+# rather than through nvchecker's own HTTP client, so it isn't part of what
+# gets recorded/replayed here. Exempting it from interception lets pacman
+# talk to it directly instead of going through mitmproxy's own CA, which
+# pacman's system CA store doesn't trust.
+ignore_hosts='127\.0\.0\.1|geo\.mirror\.pkgbuild\.com'
+
+if [[ -f ~/.mitmproxy/nvdump ]]; then
+  $mitmdump -S ~/.mitmproxy/nvdump -p 7890 --ignore-hosts "$ignore_hosts" --server-replay-extra=forward -w newdump >mitmdump_output &
+else
+  $mitmdump -w ~/.mitmproxy/nvdump -p 7890 --ignore-hosts "$ignore_hosts" >mitmdump_output &
+fi
+
+mitm_pid=$!
+
+on_exit () {
+  kill -INT $mitm_pid
+
+  if [[ -s newdump ]]; then
+    cat newdump >> ~/.mitmproxy/nvdump
+  fi
+}
+
+trap on_exit EXIT
+
+if [[ -f keyfile.toml ]]; then 
+  export KEYFILE=keyfile.toml
+fi
+
+for _ in {1..10}; do
+  if [[ -s ~/.mitmproxy/mitmproxy-ca-cert.pem ]]; then
+    break
+  fi
+  sleep 1
+done
+
+if [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+  # combine system ca bundle so that requests not going through the proxy still works (e.g. dulwich)
+  cat /etc/ssl/certs/ca-certificates.crt $HOME/.mitmproxy/mitmproxy-ca-cert.pem > $HOME/ca.crt
+else
+  cp $HOME/.mitmproxy/mitmproxy-ca-cert.pem $HOME/ca.crt
+fi
+export SSL_CERT_FILE=$HOME/ca.crt
+export GIT_SSL_CAINFO=$SSL_CERT_FILE
+export http_proxy=http://localhost:7890 https_proxy=http://localhost:7890
+
+pytest

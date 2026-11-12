@@ -1,25 +1,47 @@
 # MIT licensed
-# Copyright (c) 2013-2020 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2013-2020,2025 lilydjwg <lilydjwg@gmail.com>, et al.
 
 import asyncio
+from functools import partial
+from typing import Optional
 
 import structlog
 
-from nvchecker.api import GetVersionError
+from nvchecker.api import (
+  GetVersionError, Entry, AsyncCache, KeyManager,
+)
 
-logger = structlog.get_logger(logger_name=__name__)
+async def run_cmd(name: str, cmd: str, timeout: int = 60) -> str:
+  logger = structlog.get_logger(
+    logger_name = __name__,
+    name = name,
+    cmd = cmd,
+    timeout = timeout,
+  )
 
-async def run_cmd(cmd: str) -> str:
-  logger.debug('running cmd', cmd=cmd)
+  logger.debug('running cmd')
   p = await asyncio.create_subprocess_shell(
     cmd,
     stdout=asyncio.subprocess.PIPE,
     stderr=asyncio.subprocess.PIPE,
   )
 
-  output, error = await p.communicate()
-  output_s = output.strip().decode('latin1')
-  error_s = error.strip().decode(errors='replace')
+  if hasattr(asyncio, 'timeout'):
+    # Python 3.11+
+    try:
+      async with asyncio.timeout(timeout):
+        output, error = await p.communicate()
+        output_s = output.strip().decode('latin1')
+        error_s = error.strip().decode(errors='replace')
+    except TimeoutError:
+      p.terminate()
+      await p.wait()
+      raise GetVersionError('command timed out', cmd=cmd)
+  else:
+    output, error = await p.communicate()
+    output_s = output.strip().decode('latin1')
+    error_s = error.strip().decode(errors='replace')
+
   if p.returncode != 0:
     raise GetVersionError(
       'command exited with error',
@@ -34,7 +56,10 @@ async def run_cmd(cmd: str) -> str:
     return output_s
 
 async def get_version(
-  name, conf, *, cache, keymanager=None
-):
+  name: str, conf: Entry, *,
+  cache: AsyncCache,
+  keymanager: Optional[KeyManager] = None,
+) -> list[str]:
   cmd = conf['cmd']
-  return await cache.get(cmd, run_cmd)
+  output = await cache.get(cmd, partial(run_cmd, name))
+  return [l for line in output.splitlines() if (l := line.strip())]

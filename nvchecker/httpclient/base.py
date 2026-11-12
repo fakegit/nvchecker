@@ -27,15 +27,16 @@ class Response:
     self.body = body
 
   def json(self):
-    '''Convert reponse content to JSON.'''
+    '''Convert response content to JSON.'''
     return _json.loads(self.body.decode('utf-8'))
 
 class BaseSession:
   '''The base class for different HTTP backend.'''
   def setup(
     self,
-    concurreny: int = 20,
+    concurrency: int = 20,
     timeout: int = 20,
+    resolver: Optional[str] = None,
   ) -> None:
     pass
 
@@ -95,7 +96,7 @@ class BaseSession:
                          tries = i, exc_info = e)
           continue
 
-    raise Exception('shoud not reach')
+    raise Exception('should not reach')
 
   async def request_impl(
     self, url: str, *,
@@ -121,4 +122,4 @@ class TemporaryError(BaseHTTPError):
   '''A temporary error (e.g. network error) happens.'''
 
 class HTTPError(BaseHTTPError):
-  ''' An HTTP 4xx error happens '''
+  '''An HTTP 4xx error happens'''

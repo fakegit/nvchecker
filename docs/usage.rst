@@ -17,8 +17,8 @@ This is the version 2.0 branch. For the old version 1.x, please switch to the ``
 
 Dependency
 ----------
-- Python 3.7+
-- Python library: structlog, toml, appdirs
+- Python 3.9+
+- Python library: structlog, platformdirs, tomli (on Python < 3.11)
 - One of these Python library combinations (ordered by preference):
 
   * tornado + pycurl
@@ -71,8 +71,8 @@ The JSON log is one JSON string per line. The following documented events and
 fields are stable, undocumented ones may change without notice.
 
 event=updated
-  An update is detected. Fields ``name``, ``old_version`` and ``version`` are
-  available. ``old_version`` maybe ``null``.
+  An update is detected. Fields ``name``, ``revision``, ``old_version`` and ``version`` are
+  available. ``old_version`` may be ``null`` and ``revision`` may be absent.
 
 event=up-to-date
   There is no update. Fields ``name`` and ``version`` are available.
@@ -170,6 +170,9 @@ prefix
   Strip the prefix string if the version string starts with it. Otherwise the
   version string is returned as-is.
 
+  If both ``prefix`` and ``from_pattern``/``to_pattern`` are used, ``prefix``
+  is applied first.
+
 from_pattern, to_pattern
   Both are Python-compatible regular expressions. If ``from_pattern`` is found
   in the version string, it will be replaced with ``to_pattern``.
@@ -179,7 +182,7 @@ from_pattern, to_pattern
 
 missing_ok
   Suppress warnings and errors if a version checking module finds nothing.
-  Currently only ``regex`` supports it.
+  Not all sources support it.
 
 proxy
   The HTTP proxy to use. The format is ``proto://host:port``, e.g.
@@ -204,20 +207,13 @@ httptoken
   A personal authorization token used to fetch the url with the ``Authorization`` header.
   The type of token depends on the authorization required.
 
-  - For Bearer token set : ``Bearer <Your_bearer_token>``
-  - For Basic token set : ``Basic <Your_base64_encoded_token>``
+  - For Bearer token set \: ``Bearer <Your_bearer_token>``
+  - For Basic token set \: ``Basic <Your_base64_encoded_token>``
 
   In the keyfile add ``httptoken_{name}`` token.
 
 verify_cert
   Whether to verify the HTTPS certificate or not. Default is ``true``.
-
-If both ``prefix`` and ``from_pattern``/``to_pattern`` are used,
-``from_pattern``/``to_pattern`` are ignored. If you want to strip the prefix
-and then do something special, just use ``from_pattern``/``to_pattern``. For
-example, the transformation of ``v1_1_0`` => ``1.1.0`` can be achieved with
-``from_pattern = 'v(\d+)_(\d+)_(\d+)'`` and ``to_pattern = '\1.\2.\3'``.
-(Note that in TOML it's easiler to write regexes in single quotes so you don't need to escape ``\``.)
 
 .. _list options:
 
@@ -239,10 +235,17 @@ exclude_regex
   one, it's excluded even it's also matched by ``include_regex``.
 
 sort_version_key
-  Sort the version string using this key function. Choose between
-  ``parse_version`` and ``vercmp``. Default value is ``parse_version``.
-  ``parse_version`` use an old version of ``pkg_resources.parse_version``.
-  ``vercmp`` use ``pyalpm.vercmp``.
+  Sort the version string using this key function. Choose among
+  ``parse_version``, ``vercmp``, ``awesomeversion``, ``portage`` and ``none``.
+  Default value is ``parse_version``. ``parse_version`` uses an old version of
+  ``pkg_resources.parse_version``. ``vercmp`` uses ``pyalpm.vercmp``.
+  ``awesomeversion`` uses `awesomeversion <https://github.com/ludeeus/awesomeversion>`_.
+  ``portage`` uses ``portage.versions.vercmp``. ``none`` does not order the
+  versions; use it where they carry no ordering, such as the commit hash from a
+  ``git`` source with ``use_commit``. If the source returns several versions,
+  ``none`` takes the last one and logs a warning.
+
+  ``nvcmp`` also reads this option, in preference to its own ``--sort``.
 
 ignored
   Version strings that are explicitly ignored, separated by whitespace. This
@@ -319,14 +322,55 @@ url
 xpath
   An xpath expression used to find the version string.
 
+is_xml
+  Set to ``true`` to use an XML parser instead of an HTML one.
+
 post_data
   (*Optional*) When present, a ``POST`` request (instead of a ``GET``) will be used. The value should be a string containing the full body of the request. The encoding of the string can be specified using the ``post_data_type`` option.
 
 post_data_type
   (*Optional*) Specifies the ``Content-Type`` of the request body (``post_data``). By default, this is ``application/x-www-form-urlencoded``.
 
+This source can parse an RSS feed like this:
+
+.. code-block:: toml
+
+   [ProxmoxVE]
+   source = "htmlparser"
+   url = "https://my.proxmox.com/en/announcements/tag/proxmox-ve/rss"
+   xpath = "//item/title"
+   is_xml = true
+   from_pattern = 'Proxmox VE ([\d.]+) released!'
+   to_pattern = '\1'
+
 .. note::
-  An additional dependency "lxml" is required.
+   An additional dependency "lxml" is required.
+   You can use ``pip install 'nvchecker[htmlparser]'``.
+
+Search with an JSON Parser (jq)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "jq"
+
+Send an HTTP request and search through the body with a specific ``jq`` filter.
+
+url
+  The URL of the HTTP request.
+
+filter
+  An ``jq`` filter used to find the version string.
+
+post_data
+  (*Optional*) When present, a ``POST`` request (instead of a ``GET``) will be used. The value should be a string containing the full body of the request. The encoding of the string can be specified using the ``post_data_type`` option.
+
+post_data_type
+  (*Optional*) Specifies the ``Content-Type`` of the request body (``post_data``). By default, this is ``application/json``.
+
+This source supports :ref:`list options`.
+
+.. note::
+   An additional dependency "jq" is required.
 
 Find with a Command
 ~~~~~~~~~~~~~~~~~~~
@@ -334,7 +378,7 @@ Find with a Command
 
   source = "cmd"
 
-Use a shell command line to get the version. The output is striped first, so trailing newlines do not bother.
+Use a shell command line to get a version. The command may output multiple versions, with one version per line. Each line is stripped first, so trailing newlines do not bother. Empty lines are skipped.
 
 cmd
   The command line to use. This will run with the system's standard shell (i.e. ``/bin/sh``).
@@ -365,28 +409,50 @@ Check GitHub
   source = "github"
 
 Check `GitHub <https://github.com/>`_ for updates. The version returned is in
-date format ``%Y%m%d.%H%M%S``, e.g. ``20130701.012212``, unless ``use_latest_release``
-or ``use_max_tag`` is used. See below.
+date format ``%Y%m%d.%H%M%S``, e.g. ``20130701.012212``, unless ``use_latest_release``,
+``use_max_tag`` or ``use_max_release`` is used. See below.
 
 github
   The github repository, with author, e.g. ``lilydjwg/nvchecker``.
 
 branch
-  Which branch to track? Default: ``master``.
+  Which branch to track? Default: the repository's default.
 
 path
   Only commits containing this file path will be returned.
 
+host
+  Hostname for self-hosted GitHub instance.
+
 use_latest_release
   Set this to ``true`` to check for the latest release on GitHub.
 
-  GitHub releases are not the same with git tags. You'll see big version names
+  GitHub releases are not the same as git tags. You'll see big version names
   and descriptions in the release page for such releases, e.g.
   `zfsonlinux/zfs's <https://github.com/zfsonlinux/zfs/releases>`_, and those
   small ones like `nvchecker's <https://github.com/lilydjwg/nvchecker/releases>`_
   are only git tags that should use ``use_max_tag`` below.
 
-  Will return the release name instead of date.
+  Will return the release's tag name instead of date. (For historical reasons
+  it doesn't return the release name. See below to change.)
+
+use_max_release
+  Set this to ``true`` to check for the max release on GitHub.
+  This option returns the largest one sorted by the
+  ``sort_version_key`` option. Will return the tag name instead of date.
+
+use_release_name
+  When ``use_latest_release`` or ``use_max_release`` is ``true``,
+  setting this to ``true`` will cause nvchecker to return the release name
+  instead of the tag name.
+
+include_prereleases
+  When ``use_latest_release`` or ``use_max_release`` is ``true``,
+  set this to ``true`` to take prereleases into account.
+
+  This returns the release names (not the tag names).
+
+  This requires a token because it's using the v4 GraphQL API.
 
 use_latest_tag
   Set this to ``true`` to check for the latest tag on GitHub.
@@ -399,22 +465,44 @@ query
 
 use_max_tag
   Set this to ``true`` to check for the max tag on GitHub. Unlike
-  ``use_latest_release``, this option includes both annotated tags and
+  ``use_max_release``, this option includes both annotated tags and
   lightweight ones, and return the largest one sorted by the
   ``sort_version_key`` option. Will return the tag name instead of date.
 
 token
   A personal authorization token used to call the API.
 
-An authorization token may be needed in order to use ``use_latest_tag`` or to
-request more frequently than anonymously.
+An authorization token may be needed in order to use ``use_latest_tag``,
+``include_prereleases`` or to request more frequently than anonymously.
 
 To set an authorization token, you can set:
 
-- a key named ``github`` in the keyfile
 - the token option
+- an entry in the keyfile for the host (e.g. ``github.com``)
+- an entry in your ``netrc`` file for the host
 
-This source supports :ref:`list options` when ``use_max_tag`` is set.
+This source supports :ref:`list options` when ``use_max_tag`` or
+``use_max_release`` is set.
+
+RichResult metadata
+~~~~~~~~~~~~~~~~~~~
+
+When available from the existing GitHub API responses, this source populates
+the following optional ``RichResult`` fields. No additional API requests are
+issued solely to retrieve timestamp information.
+
+==================================== ====================== =============================================
+Mode                                 creation_time          revision_creation_time
+==================================== ====================== =============================================
+default commit/path                  -                      commit timestamp
+``use_latest_release``               release publish time   -
+``use_max_release``                  release publish time   -
+``use_latest_release`` +
+``include_prereleases``              release publish time   commit timestamp
+``use_latest_tag``                   -                      tag creation time (annotated tags) or commit
+                                                            timestamp (lightweight tags)
+``use_max_tag``                      -                      -
+==================================== ====================== =============================================
 
 Check Gitea
 ~~~~~~~~~~~
@@ -429,11 +517,18 @@ gitea
   The gitea repository, with author, e.g. ``gitea/tea``.
 
 branch
-  Which branch to track? Default: ``master``.
+  Which branch to track? Default: the repository's default.
 
 use_max_tag
   Set this to ``true`` to check for the max tag on Gitea. Will return the biggest one
   sorted by old ``pkg_resources.parse_version``. Will return the tag name instead of date.
+
+use_latest_release
+  Set this to ``true`` to check for the latest release name on gitea.
+
+  Gitea releases are not the same as git tags. You'll see big version names
+  and descriptions in the release page for such releases, e.g.
+  `ciberandy/qiv's <https://codeberg.org/ciberandy/qiv/releases>`_
 
 host
   Hostname for self-hosted Gitea instance.
@@ -443,10 +538,20 @@ token
 
 To set an authorization token, you can set:
 
-- a key named ``gitea_{host}`` in the keyfile, where ``host`` is all-lowercased host name
 - the token option
+- an entry in the keyfile for the host (e.g. ``gitea.com``)
+- an entry in your ``netrc`` file for the host
 
 This source supports :ref:`list options` when ``use_max_tag`` is set.
+
+Check Gogs / Forgejo / Codeberg
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Please use the above "gitea" source. Gitea is a fork of `Gogs <https://gogs.io/>`_.
+`Forgejo <https://forgejo.org/>`_ is a fork of Gitea. Codeberg is a code
+hosting provider that uses Forgejo. They share the same API endpoints nvchecker uses.
+
+Alternatively, you can try the generic "git" source.
 
 Check BitBucket
 ~~~~~~~~~~~~~~~
@@ -461,17 +566,33 @@ bitbucket
   The bitbucket repository, with author, e.g. ``lilydjwg/dotvim``.
 
 branch
-  Which branch to track? Default is the repository's default.
+  Which branch to track? Default: the repository's default.
 
 use_max_tag
   Set this to ``true`` to check for the max tag on BitBucket. Will return the biggest one
   sorted by old ``pkg_resources.parse_version``. Will return the tag name instead of date.
 
+use_sorted_tags
+    If ``true``, tags are queried and sorted according to the ``query`` and
+    ``sort`` keys. Will return the tag name instead of the date.
+
+query
+    A query string use to filter tags when ``use_sorted_tags`` set (see
+    `here <https://developer.atlassian.com/cloud/bitbucket/rest/intro/#querying>`__
+    for examples). The string does not need to be escaped.
+
+sort
+    A field used to sort the tags when ``use_sorted_tags`` is set (see
+    `here <https://developer.atlassian.com/cloud/bitbucket/rest/intro/#filtering>`__
+    for examples). Defaults to ``-target.date`` (sorts tags in descending order
+    by date).
+
 max_page
   How many pages do we search for the max tag? Default is 3. This works when
   ``use_max_tag`` is set.
 
-This source supports :ref:`list options` when ``use_max_tag`` is set.
+This source supports :ref:`list options` when ``use_max_tag`` or
+``use_sorted_tags`` is set.
 
 Check GitLab
 ~~~~~~~~~~~~
@@ -500,10 +621,25 @@ token
 
 To set an authorization token, you can set:
 
-- a key named ``gitlab_{host}`` in the keyfile, where ``host`` is all-lowercased host name
 - the token option
+- an entry in the keyfile for the host (e.g. ``gitlab.com``)
+- an entry in your ``netrc`` file for the host
 
 This source supports :ref:`list options` when ``use_max_tag`` is set.
+
+RichResult metadata
+~~~~~~~~~~~~~~~~~~~
+
+When available from the existing GitLab API responses, this source populates
+the following optional ``RichResult`` fields. No additional API requests are
+issued solely to retrieve timestamp information.
+
+================  ======================  ==========================
+Mode              ``creation_time``       ``revision_creation_time``
+================  ======================  ==========================
+default commit    -                       commit timestamp
+``use_max_tag``   tag creation time       commit timestamp
+================  ======================  ==========================
 
 Check PyPI
 ~~~~~~~~~~
@@ -511,13 +647,27 @@ Check PyPI
 
   source = "pypi"
 
-Check `PyPI <https://pypi.python.org/>`_ for updates.
+Check `PyPI <https://pypi.python.org/>`_ for updates. Yanked releases are ignored.
 
 pypi
   The name used on PyPI, e.g. ``PySide``.
 
 use_pre_release
   Whether to accept pre release. Default is false.
+
+This source supports :ref:`list options`.
+
+RichResult metadata:
+
+================  ===================================  ==========================
+Mode              ``creation_time``                    ``revision_creation_time``
+================  ===================================  ==========================
+all versions      earliest available file upload time  -
+================  ===================================  ==========================
+
+.. note::
+   An additional dependency "packaging" is required.
+   You can use ``pip install 'nvchecker[pypi]'``.
 
 Check RubyGems
 ~~~~~~~~~~~~~~
@@ -560,6 +710,21 @@ Check `Hackage <https://hackage.haskell.org/>`_ for updates.
 hackage
   The name used on Hackage, e.g. ``pandoc``.
 
+Check Maven
+~~~~~~~~~~~
+::
+
+  source = "maven"
+
+Check a `Maven repository <https://maven.apache.org/>`_ for updates.
+
+repo
+  URL of the repository to check (defaults to ``https://repo1.maven.org/maven2``).
+group
+  Group identifier for the coordinates.
+artifact
+  Artifact identifier for the coordinates.
+
 Check CPAN
 ~~~~~~~~~~
 ::
@@ -570,6 +735,17 @@ Check `MetaCPAN <https://metacpan.org/>`_ for updates.
 
 cpan
   The name used on CPAN, e.g. ``YAML``.
+
+Check CRAN
+~~~~~~~~~~
+::
+
+  source = "cran"
+
+Check `CRAN <https://cran.r-project.org/web/packages/>`_ for updates.
+
+cran
+  The name used on CRAN, e.g. ``xml2``.
 
 Check Packagist
 ~~~~~~~~~~~~~~~
@@ -588,10 +764,15 @@ Check crates.io
 
   source = "cratesio"
 
-Check `crates.io <https://crates.io/>`_ for updates.
+Check `crates.io <https://crates.io/>`_ for updates. Yanked releases are ignored.
 
 cratesio
   The crate name on crates.io, e.g. ``tokio``.
+
+use_pre_release
+  Whether to accept pre release. Default is false.
+
+This source supports :ref:`list options`.
 
 Check Local Pacman Database
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -674,7 +855,7 @@ repo
 
 subrepo
   Check the version in this subrepo. This field is optional.
-  When ommited all subrepos are queried.
+  When omitted all subrepos are queried.
 
 This source supports :ref:`list options`.
 
@@ -688,6 +869,11 @@ This enables you to track updates from `Anitya <https://release-monitoring.org/>
 
 anitya
   ``distro/package``, where ``distro`` can be a lot of things like "fedora", "arch linux", "gentoo", etc. ``package`` is the package name of the chosen distribution.
+
+anitya_id
+  The identifier of the project/package in anitya.
+
+Note that either anitya or anitya_id needs to be specified, anitya_id is preferred when both specified.
 
 Check Android SDK
 ~~~~~~~~~~~~~~~~~
@@ -704,7 +890,12 @@ repo
   Should be one of ``addon`` or ``package``. Packages in ``addon2-1.xml`` use ``addon`` and packages in ``repository2-1.xml`` use ``package``.
 
 channel
-  Choose the target channel from one of ``stable``, ``beta``, ``dev`` or ``canary``. This option also accepts a comma-seperated list to pick from multiple channels. For example, the latest unstable version is picked with ``beta,dev,canary``.
+  Choose the target channel from one of ``stable``, ``beta``, ``dev`` or ``canary``. This option also accepts a comma-separated list to pick from multiple channels. For example, the latest unstable version is picked with ``beta,dev,canary``. The default is ``stable``.
+
+host_os
+  Choose the target OS for the tracked package from one of ``linux``, ``macosx``, ``windows``. The default is ``linux``. For OS-independent packages (e.g., Java JARs), this field is ignored.
+
+This source supports :ref:`list options`.
 
 Check Sparkle framework
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -716,6 +907,9 @@ This enables you to track updates of macOS applications which using `Sparkle fra
 
 sparkle
   The url of the sparkle appcast.
+
+release_notes_language
+  The language of release notes to return when localized release notes are available (defaults to ``en`` for English, the unlocalized release notes are used as a fallback)
 
 Check Pagure
 ~~~~~~~~~~~~
@@ -764,6 +958,30 @@ strip_release
 
 Note that either pkg or srcpkg needs to be specified (but not both) or the item name will be used as pkg.
 
+Check RPM repository
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "rpmrepo"
+
+This enables you to check latest package versions in an arbitrary RPM repository in `repomd` format used by package managers such as ``dnf`` (Fedora, RHEL, AlmaLinux etc.) or ``zypper`` (openSUSE) without the need for native RPM tools.
+
+pkg
+  Name of the RPM package (you can also use ``rpmrepo`` as with other sources, but ``pkg`` is preferred for clarity)
+
+repo
+  URL of the repository (required, ``repodata/repomd.xml`` should be there)
+
+arch
+  Architecture of the RPM package (``binary``, ``src``, ``any``, ``x86_64``, ``aarch64``, etc, defaults to ``binary``)
+
+This source supports :ref:`list options`.
+
+.. note::
+   The additional dependency ``lxml`` is required. On Python versions earlier
+   than 3.14, ``zstandard`` is required as well.
+   You can install them with ``pip install 'nvchecker[rpmrepo]'``.
+
 Check Git repository
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ::
@@ -783,6 +1001,101 @@ branch
 
 When this source returns tags (``use_commit`` is not true) it supports :ref:`list options`.
 
+Check Git repository without git CLI using pygit2
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "git_pygit2"
+
+This is similar to the ``git`` source, but uses pygit2/libgit2 instead of
+invoking the ``git`` executable. It is useful in environments where Python
+packages can be installed but external binaries cannot be executed.
+
+git
+  URL of the Git repository.
+
+username
+  Username to use for HTTP authentication.
+
+password_key
+  Key name used to retrieve the password or access token from the configured
+  keyfile.
+
+use_commit
+  Return a commit hash instead of tags.
+
+branch
+  When ``use_commit`` is true, return the commit on the specified branch instead
+  of the default one.
+
+Example for a private GitHub repository::
+
+  source = "git_pygit2"
+  git = "https://github.com/example/private-repo.git"
+  username = "x-access-token"
+  password_key = "github"
+
+When this source returns tags (``use_commit`` is not true) it supports
+:ref:`list options`.
+
+.. note::
+   An additional dependency ``pygit2`` is required.
+
+Check Git repository without git CLI using Dulwich
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "git_dulwich"
+
+This is similar to the ``git`` source, but uses Dulwich instead of invoking
+the ``git`` executable. It is useful in environments where Python packages can
+be installed but external binaries cannot be executed.
+
+This source does not support proxy environment variables currently.
+
+git
+  URL of the Git repository.
+
+username
+  Username to use for HTTP authentication.
+
+password_key
+  Key name used to retrieve the password or access token from the configured
+  keyfile.
+
+use_commit
+  Return a commit hash instead of tags.
+
+branch
+  When ``use_commit`` is true, return the commit on the specified branch instead
+  of the default one.
+
+Example for a private GitHub repository::
+
+  source = "git_dulwich"
+  git = "https://github.com/example/private-repo.git"
+  username = "x-access-token"
+  password_key = "github"
+
+When this source returns tags (``use_commit`` is not true) it supports
+:ref:`list options`.
+
+.. note::
+   An additional dependency ``dulwich`` is required.
+
+Check Mercurial repository
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "mercurial"
+
+This enables you to check tags of an arbitrary mercurial (hg) repository.
+
+mercurial
+  URL of the Mercurial repository.
+
+This source returns tags and supports :ref:`list options`.
+
 Check container registry
 ~~~~~~~~~~~~~~~~~~~~~~~~
 ::
@@ -792,7 +1105,9 @@ Check container registry
 This enables you to check tags of images on a container registry like Docker.
 
 container
-  The path for the container image. For official Docker images, use namespace ``library/`` (e.g. ``library/python``).
+  The path (and tag) for the container image. For official Docker images, use namespace ``library/`` (e.g. ``library/python``).
+
+  If no tag is given, it checks latest available tag (sort by tag name), otherwise, it checks the tag's update time.
 
 registry
   The container registry host. Default: ``docker.io``
@@ -803,17 +1118,23 @@ container name while this plugin requires the full name. If the host part is
 omitted, use ``docker.io``, and if there is no slash in the path, prepend
 ``library/`` to the path. Here are some examples:
 
-+----------------------------------------------+-----------+--------------------------+
-| Pull command                                 | registry  | container                |
-+==============================================+===========+==========================+
-| docker pull quay.io/prometheus/node-exporter | quay.io   | prometheus/node-exporter |
-+----------------------------------------------+-----------+--------------------------+
-| docker pull nvidia/cuda                      | docker.io | nvidia/cuda              |
-+----------------------------------------------+-----------+--------------------------+
-| docker pull python                           | docker.io | library/python           |
-+----------------------------------------------+-----------+--------------------------+
++-----------------------------------------------------+-----------+---------------------------------+
+| Pull        command                                 | registry  | container                       |
++=====================================================+===========+=================================+
+| docker pull quay.io/prometheus/node-exporter        | quay.io   | prometheus/node-exporter        |
++-----------------------------------------------------+-----------+---------------------------------+
+| docker pull quay.io/prometheus/node-exporter:master | quay.io   | prometheus/node-exporter:master |
++-----------------------------------------------------+-----------+---------------------------------+
+| docker pull openeuler/openeuler                     | docker.io | openeuler/openeuler             |
++-----------------------------------------------------+-----------+---------------------------------+
+| docker pull openeuler/openeuler:20.03-lts           | docker.io | openeuler/openeuler:20.03-lts   |
++-----------------------------------------------------+-----------+---------------------------------+
+| docker pull python                                  | docker.io | library/python                  |
++-----------------------------------------------------+-----------+---------------------------------+
+| docker pull python:3.11                             | docker.io | library/python:3.11             |
++-----------------------------------------------------+-----------+---------------------------------+
 
-This source returns tags and supports :ref:`list options`.
+If no tag is given, this source returns tags and supports :ref:`list options`.
 
 Check ALPM database
 ~~~~~~~~~~~~~~~~~~~
@@ -827,7 +1148,10 @@ alpm
   Name of the package.
 
 repo
-  Name of the package repository in which the package resides. If not provided, nvchecker will search ``core``, ``extra``, ``community`` and ``multilib``, in that order.
+  Name of the package repository in which the package resides. If not provided, nvchecker will use ``repos`` value, see below.
+
+repos
+  An array of possible repositories in which the package may reside in, nvchecker will use the first repository which contains the package. If not provided, ``core``, ``extra`` and ``multilib`` will be used, in that order.
 
 dbpath
   Path to the ALPM database directory. Default: ``/var/lib/pacman``. You need to update the database yourself.
@@ -837,6 +1161,39 @@ strip_release
 
 provided
   Instead of the package version, return the version this package provides. Its value is what the package provides, and ``strip_release`` takes effect too. This is best used with libraries.
+
+.. note::
+   An additional dependency "pyalpm" is required.
+
+Check ALPM files database
+~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "alpmfiles"
+
+Search package files in a local ALPM files database. The package does not need to be installed. This can be useful for checking shared library versions if a package does not list them in its ``provides``.
+
+pkgname
+  Name of the package.
+
+filename
+  Regular expression for the file path. If it contains one matching group, that group is returned. Otherwise return the whole file path. Paths do not have an initial slash. For example, ``usr/lib/libuv\\.so\\.([^.]+)`` matches the major shared library version of libuv.
+
+repo
+  Name of the package repository in which the package resides. If not provided, search all repositories.
+
+strip_dir
+  Strip directory from the path before matching. Defaults to ``false``.
+
+dbpath
+  Path to the ALPM database directory. Default: ``/var/lib/pacman``. You need to update the database yourself with ``pacman -Fy``.
+
+This source runs the ``pacman -Flq ...`` command. To configure how many pacman instances are running concurrently::
+
+  [__config__.source.alpmfiles]
+  concurrency = 2
+
+By default it is ``2``. ``pacman -Flq ...`` uses a lot of memory so be careful.
 
 Check Open Vsx
 ~~~~~~~~~~~~~~~
@@ -848,9 +1205,9 @@ Check `Open Vsx <https://open-vsx.org/>`_ for updates.
 
 openvsx
   The extension's Unique Identifier on open-vsx.org, e.g. ``ritwickdey.LiveServer``.
-  
+
 Check Visual Studio Code Marketplace
-~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ::
 
   source = "vsmarketplace"
@@ -859,6 +1216,47 @@ Check `Visual Studio Code Marketplace <https://marketplace.visualstudio.com/vsco
 
 vsmarketplace
   The extension's Unique Identifier on marketplace.visualstudio.com/vscode, e.g. ``ritwickdey.LiveServer``.
+
+Check Go packages and modules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "go"
+
+Check `Go packages and modules <https://pkg.go.dev/>`_ for updates.
+
+go
+  The name of Go package or module, e.g. ``github.com/caddyserver/caddy/v2/cmd``.
+
+Check opam repository
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "opam"
+
+This enables you to check latest package versions in an arbitrary `opam repository <https://opam.ocaml.org/doc/Manual.html#Repositories>` without the need for the opam command line tool.
+
+pkg
+  Name of the opam package
+
+repo
+  URL of the repository (optional, the default ``https://opam.ocaml.org`` repository is used if not specified)
+
+This source supports :ref:`list options`.
+
+Check Snapcraft
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+  source = "snapcraft"
+
+This source allows you to check the latest package versions in the `Snapcraft <https://snapcraft.io>`_.
+
+snap
+  Name of the snap package.
+
+channel
+  Name of the channel.
 
 Combine others' results
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -907,5 +1305,5 @@ Extending
 It's possible to extend the supported sources by writing
 plugins. See :doc:`plugin` for documentation.
 
-.. _Pacman: https://wiki.archlinux.org/index.php/Pacman
+.. _Pacman: https://wiki.archlinux.org/title/Pacman
 .. _toml: https://toml.io/

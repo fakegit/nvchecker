@@ -1,5 +1,5 @@
 # MIT licensed
-# Copyright (c) 2013-2020 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2013-2020, 2024 lilydjwg <lilydjwg@gmail.com>, et al.
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import argparse
 from typing import (
   Tuple, NamedTuple, Optional, List, Union,
   cast, Dict, Awaitable, Sequence, Any,
+  TYPE_CHECKING,
 )
 import types
 from pathlib import Path
@@ -19,17 +20,27 @@ from importlib import import_module
 import re
 import contextvars
 import json
+import dataclasses
 
 import structlog
-import toml
-import appdirs
+
+if TYPE_CHECKING:
+  import tomli as tomllib
+else:
+  try:
+    import tomllib
+  except ModuleNotFoundError:
+    import tomli as tomllib
+
+import platformdirs
 
 from .lib import nicelogger
 from . import slogconf
 from .util import (
-  Entry, Entries, KeyManager, RawResult, Result, VersData,
+  Entry, Entries, KeyManager, RawResult, RichResult, ResultData,
   FunctionWorker, GetVersionError,
   FileLoadError, EntryWaiter,
+  apply_regex_match,
 )
 from . import __version__
 from .sortversion import sort_version_keys
@@ -40,7 +51,7 @@ from . import httpclient
 logger = structlog.get_logger(logger_name=__name__)
 
 def get_default_config() -> str:
-  confdir = appdirs.user_config_dir(appname='nvchecker')
+  confdir = platformdirs.user_config_dir(appname='nvchecker')
   file = os.path.join(confdir, 'nvchecker.toml')
   return file
 
@@ -67,6 +78,8 @@ def process_common_arguments(args: argparse.Namespace) -> bool:
   processors = [
     slogconf.exc_info,
     slogconf.filter_exc,
+    slogconf.filter_nones,
+    slogconf.filter_taskname,
   ]
   logger_factory = None
 
@@ -101,11 +114,12 @@ def process_common_arguments(args: argparse.Namespace) -> bool:
     return True
   return False
 
-def safe_overwrite(fname: str, data: Union[bytes, str], *,
+def safe_overwrite(file: Path, data: Union[bytes, str], *,
                    method: str = 'write', mode: str = 'w', encoding: Optional[str] = None) -> None:
   # FIXME: directory has no read perm
-  # FIXME: symlinks and hard links
-  tmpname = fname + '.tmp'
+  # FIXME: hard links
+  resolved_path = file.resolve()
+  tmpname = str(resolved_path) + '.tmp'
   # if not using "with", write can fail without exception
   with open(tmpname, mode, encoding=encoding) as f:
     getattr(f, method)(data)
@@ -113,9 +127,9 @@ def safe_overwrite(fname: str, data: Union[bytes, str], *,
     f.flush()
     os.fsync(f.fileno())
   # if the above write failed (because disk is full etc), the old data should be kept
-  os.rename(tmpname, fname)
+  os.rename(tmpname, resolved_path)
 
-def read_verfile(file: Path) -> VersData:
+def read_verfile(file: Path) -> ResultData:
   try:
     with open(file) as f:
       data = f.read()
@@ -131,16 +145,40 @@ def read_verfile(file: Path) -> VersData:
       name, ver = l.rstrip().split(None, 1)
       v[name] = ver
 
+  if v.get('version') is None:
+    v = {k: RichResult(version=a) for k, a in v.items()}
+  elif v['version'] == 2:
+    v = {k: RichResult(**a) for k, a in v['data'].items()}
+  else:
+    raise Exception('unknown verfile version', v['version'])
+
   return v
 
-def write_verfile(file: Path, versions: VersData) -> None:
-  # sort and indent to make it friendly to human and git
+def write_verfile(file: Path, versions: ResultData) -> None:
+  d = {
+    'version': 2,
+    # sort and indent to make it friendly to human and git
+    'data': dict(sorted(versions.items())),
+  }
   data = json.dumps(
-    dict(sorted(versions.items())),
-    indent=2,
-    ensure_ascii=False,
+    d,
+    indent = 2,
+    ensure_ascii = False,
+    default = json_encode,
   ) + '\n'
-  safe_overwrite(str(file), data)
+  safe_overwrite(file, data)
+
+def _rich_result_to_dict(result: RichResult) -> Dict[str, Any]:
+  return {
+    k: v
+    for k, v in dataclasses.asdict(result).items()
+    if v is not None
+  }
+
+def json_encode(obj):
+  if isinstance(obj, RichResult):
+    return _rich_result_to_dict(obj)
+  raise TypeError(obj)
 
 class Options(NamedTuple):
   ver_files: Optional[Tuple[Path, Path]]
@@ -150,14 +188,16 @@ class Options(NamedTuple):
   source_configs: Dict[str, Dict[str, Any]]
   httplib: Optional[str]
   http_timeout: int
+  resolver: Optional[str]
 
 def load_file(
   file: str, *,
   use_keymanager: bool,
 ) -> Tuple[Entries, Options]:
   try:
-    config = toml.load(file)
-  except (OSError, toml.TomlDecodeError) as e:
+    with open(file, 'rb') as f:
+      config = tomllib.load(f)
+  except (OSError, tomllib.TOMLDecodeError) as e:
     raise FileLoadError('version configuration file', file, e)
 
   ver_files: Optional[Tuple[Path, Path]] = None
@@ -192,25 +232,27 @@ def load_file(
     proxy = c.get('proxy')
     httplib = c.get('httplib', None)
     http_timeout = c.get('http_timeout', 20)
+    resolver = c.get('resolver', None)
   else:
     max_concurrency = 20
     proxy = None
     httplib = None
     http_timeout = 20
+    resolver = None
 
   return cast(Entries, config), Options(
     ver_files, max_concurrency, proxy, keymanager,
-    source_configs, httplib, http_timeout,
+    source_configs, httplib, http_timeout, resolver,
   )
 
 def setup_httpclient(
   max_concurrency: int = 20,
   httplib: Optional[str] = None,
   http_timeout: int = 20,
+  resolver: Optional[str] = None,
 ) -> Dispatcher:
   httplib_ = httplib or httpclient.find_best_httplib()
-  httpclient.setup(
-    httplib_, max_concurrency, http_timeout)
+  httpclient.setup(httplib_, max_concurrency, http_timeout, resolver)
   return Dispatcher()
 
 class Dispatcher:
@@ -237,7 +279,7 @@ class Dispatcher:
         mods[source] = mod, tasks
         config = source_configs.get(source)
         if config and getattr(mod, 'configure'):
-          mod.configure(config) # type: ignore
+          mod.configure(config)
       else:
         tasks = mods[source][1]
       tasks.append((name, entry))
@@ -245,7 +287,7 @@ class Dispatcher:
     ret = []
     for mod, tasks in mods.values():
       if hasattr(mod, 'Worker'):
-        worker_cls = mod.Worker # type: ignore
+        worker_cls = mod.Worker
       else:
         worker_cls = FunctionWorker
 
@@ -255,10 +297,10 @@ class Dispatcher:
         task_sem, result_q, tasks, keymanager,
       )
       if worker_cls is FunctionWorker:
-        func = mod.get_version # type: ignore
+        func = mod.get_version
         ctx.run(worker.initialize, func)
 
-      ret.append(ctx.run(worker.run))
+      ret.append(ctx.run(worker._run_maynot_raise))
 
     return ret
 
@@ -267,13 +309,12 @@ def substitute_version(
 ) -> str:
   '''
   Substitute the version string via defined rules in the configuration file.
-  See README.rst#global-options for details.
+  See usage.rst#global-options for details.
   '''
   prefix = conf.get('prefix')
   if prefix:
     if version.startswith(prefix):
       version = version[len(prefix):]
-    return version
 
   from_pattern = conf.get('from_pattern')
   if from_pattern:
@@ -281,43 +322,54 @@ def substitute_version(
     if to_pattern is None:
       raise ValueError("from_pattern exists but to_pattern doesn't")
 
-    return re.sub(from_pattern, to_pattern, version)
+    version = re.sub(from_pattern, to_pattern, version)
 
-  # No substitution rules found. Just return the original version string.
   return version
 
 def apply_list_options(
-  versions: List[str], conf: Entry,
-) -> Optional[str]:
+  versions: Union[List[str], List[RichResult]],
+  conf: Entry,
+  name: str,
+) -> Optional[Union[str, RichResult]]:
   pattern = conf.get('include_regex')
-  if pattern:
-    re_pat = re.compile(pattern)
-    versions = [x for x in versions
-                if re_pat.fullmatch(x)]
+  if versions and pattern:
+    versions2 = apply_regex_match(re.compile(pattern), versions, True)
+    if not versions2:
+      logger.warning('include_regex matched no versions',
+                     name=name, versions=versions, regex=pattern)
+      return None
+    versions = versions2
 
   pattern = conf.get('exclude_regex')
   if pattern:
-    re_pat = re.compile(pattern)
-    versions = [x for x in versions
-                if not re_pat.fullmatch(x)]
+    versions = apply_regex_match(re.compile(pattern), versions, False)
 
   ignored = set(conf.get('ignored', '').split())
   if ignored:
-    versions = [x for x in versions if x not in ignored]
+    if isinstance(versions[0], RichResult):
+      versions = [x for x in versions if str(x) not in ignored]
+    else:
+      versions = [x for x in versions if x not in ignored]
 
   if not versions:
     return None
 
-  sort_version_key = sort_version_keys[
-    conf.get("sort_version_key", "parse_version")]
-  versions.sort(key=sort_version_key)
+  sort_version_key_name = conf.get("sort_version_key", "parse_version")
+  if sort_version_key_name == "none" and len(versions) > 1:
+    logger.warning('sort_version_key is none and the source returned several '
+                   'versions; using the last one',
+                   name=name, versions=versions)
+  sort_version_key = sort_version_keys[sort_version_key_name]
+  versions.sort(key=lambda version: sort_version_key(str(version)))
 
   return versions[-1]
 
-def _process_result(r: RawResult) -> Union[Result, Exception]:
+def _process_result(r: RawResult) -> Union[RichResult, Exception]:
   version = r.version
   conf = r.conf
   name = r.name
+
+  result = None
 
   if isinstance(version, GetVersionError):
     kw = version.kwargs
@@ -329,7 +381,13 @@ def _process_result(r: RawResult) -> Union[Result, Exception]:
                   name=r.name, exc_info=r.version)
     return version
   elif isinstance(version, list):
-    version_str = apply_list_options(version, conf)
+    version_str = apply_list_options(version, conf, name)
+    if isinstance(version_str, RichResult):
+      result = version_str
+      version_str = version_str.version
+  elif isinstance(version, RichResult):
+    result = version
+    version_str = version.version
   else:
     version_str = version
 
@@ -338,7 +396,9 @@ def _process_result(r: RawResult) -> Union[Result, Exception]:
 
     try:
       version_str = substitute_version(version_str, conf)
-      return Result(name, version_str, conf)
+      if result is None:
+        return RichResult(version=version_str)
+      return dataclasses.replace(result, version=version_str)
     except (ValueError, re.error) as e:
       logger.exception('error occurred in version substitutions', name=name)
       return e
@@ -347,32 +407,57 @@ def _process_result(r: RawResult) -> Union[Result, Exception]:
     return ValueError('no version returned')
 
 def check_version_update(
-  oldvers: VersData, name: str, version: str,
+  oldvers: ResultData,
+  name: str,
+  r: RichResult,
+  verbose: bool,
 ) -> None:
-  oldver = oldvers.get(name, None)
-  if not oldver or oldver != version:
-    logger.info('updated', name=name, version=version, old_version=oldver)
+  if old_result := oldvers.get(name):
+    oldver = old_result.version
   else:
-    logger.debug('up-to-date', name=name, version=version)
+    oldver = None
+  if not oldver or oldver != r.version:
+    logger.info(
+      'updated',
+      name = name,
+      version = r.version,
+      revision = r.revision,
+      old_version = oldver,
+      url = r.url,
+      rich_result = _rich_result_to_dict(r),
+    )
+  else:
+    # provide visible user feedback if it was the only entry
+    level = logging.INFO if verbose else logging.DEBUG
+    logger.log(level, 'up-to-date', name=name, version=r.version, url=r.url)
 
 async def process_result(
-  oldvers: VersData,
+  oldvers: ResultData,
   result_q: Queue[RawResult],
   entry_waiter: EntryWaiter,
-) -> VersData:
+  verbose: bool = False,
+) -> Tuple[ResultData, bool]:
   ret = {}
+  has_failures = False
   try:
     while True:
       r = await result_q.get()
-      r1 = _process_result(r)
+      try:
+        r1 = _process_result(r)
+      except Exception as e:
+        logger.exception('error processing result', result=r)
+        r1 = e
       if isinstance(r1, Exception):
         entry_waiter.set_exception(r.name, r1)
+        # no versions are returned from "apply_list_options"?
+        logger.error('no-result', name=r.name, error=repr(r1))
+        has_failures = True
         continue
-      check_version_update(oldvers, r1.name, r1.version)
-      entry_waiter.set_result(r1.name, r1.version)
-      ret[r1.name] = r1.version
+      check_version_update(oldvers, r.name, r1, verbose)
+      entry_waiter.set_result(r.name, r1.version)
+      ret[r.name] = r1
   except asyncio.CancelledError:
-    return ret
+    return ret, has_failures
 
 async def run_tasks(
   futures: Sequence[Awaitable[None]]

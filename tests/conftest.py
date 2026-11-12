@@ -1,23 +1,32 @@
 # MIT licensed
-# Copyright (c) 2020 lilydjwg <lilydjwg@gmail.com>, et al.
+# Copyright (c) 2020, 2024 lilydjwg <lilydjwg@gmail.com>, et al.
 
 import asyncio
 import structlog
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING, Dict
 
-import toml
+if TYPE_CHECKING:
+  import tomli as tomllib
+else:
+  try:
+    import tomllib
+  except ModuleNotFoundError:
+    import tomli as tomllib
+
 import pytest
+import pytest_asyncio
 
 from nvchecker import core
 from nvchecker import __main__ as main
-from nvchecker.util import Entries, VersData, RawResult
+from nvchecker.util import Entries, ResultData, RawResult
 
 use_keyfile = False
 
-async def run(
+async def run_results(
   entries: Entries, max_concurrency: int = 20,
-) -> VersData:
+) -> ResultData:
   task_sem = asyncio.Semaphore(max_concurrency)
   result_q: asyncio.Queue[RawResult] = asyncio.Queue()
   keyfile = os.environ.get('KEYFILE')
@@ -34,13 +43,20 @@ async def run(
     keymanager, entry_waiter, 1, {},
   )
 
-  oldvers: VersData = {}
+  oldvers: ResultData = {}
   result_coro = core.process_result(oldvers, result_q, entry_waiter)
   runner_coro = core.run_tasks(futures)
 
-  return await main.run(result_coro, runner_coro)
+  results, _has_failures = await main.run(result_coro, runner_coro)
+  return results
 
-@pytest.fixture(scope="module")
+async def run(
+  entries: Entries, max_concurrency: int = 20,
+) -> Dict[str, str]:
+  results = await run_results(entries, max_concurrency)
+  return {k: r.version for k, r in results.items()}
+
+@pytest_asyncio.fixture(scope="session")
 async def get_version():
   async def __call__(name, config):
     entries = {name: config}
@@ -49,39 +65,43 @@ async def get_version():
 
   return __call__
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="session")
+async def get_result():
+  async def __call__(name, config):
+    entries = {name: config}
+    results = await run_results(entries)
+    return results.get(name)
+
+  return __call__
+
+@pytest_asyncio.fixture(scope="session")
 async def run_str():
   async def __call__(str):
-    entries = toml.loads(str)
+    entries = tomllib.loads(str)
     newvers = await run(entries)
     return newvers.popitem()[1]
 
   return __call__
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="session")
 async def run_str_multi():
   async def __call__(str):
-    entries = toml.loads(str)
+    entries = tomllib.loads(str)
     newvers = await run(entries)
     return newvers
 
   return __call__
-
-@pytest.fixture(scope="session")
-def event_loop(request):
-  """Override pytest-asyncio's event_loop fixture,
-     Don't create an instance of the default event loop for each test case.
-     We need the same ioloop across tests for the aiohttp support.
-  """
-  loop = asyncio.get_event_loop()
-  yield loop
 
 @pytest.fixture(scope="session", autouse=True)
 def raise_on_logger_msg():
   def proc(logger, method_name, event_dict):
     if method_name in ('warning', 'error'):
       if 'exc_info' in event_dict:
-        raise event_dict['exc_info']
+        exc = event_dict['exc_info']
+        if isinstance(exc, Exception):
+          raise exc
+        else: # exc_info=True
+          raise
       if not event_dict['event'].startswith(('rate limited', 'no-result')):
         raise RuntimeError(event_dict['event'])
     return event_dict['event']

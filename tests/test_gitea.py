@@ -1,24 +1,33 @@
 # MIT licensed
 # Copyright (c) 2013-2020 lilydjwg <lilydjwg@gmail.com>, et al.
 
-from flaky import flaky
 import pytest
 pytestmark = [pytest.mark.asyncio,
               pytest.mark.needs_net]
 
-@flaky(max_runs=10)
+@pytest.mark.flaky(reruns=10)
 async def test_gitea(get_version):
     ver = await get_version("example", {
         "source": "gitea",
         "gitea": "gitea/tea"})
-    assert len(ver) == 8
-    assert ver.isdigit()
+    assert ver.startswith('20')
+    assert 'T' in ver
 
-@flaky(max_runs=10)
+@pytest.mark.flaky(reruns=10)
 async def test_gitea_max_tag_with_include(get_version):
     assert await get_version("example", {
         "source": "gitea",
         "gitea": "gitea/tea",
         "use_max_tag": True,
-        "include_regex": r'v0\.3.*',
-    }) == "v0.3.1"
+        "include_regex": r'v0\.14.*',
+    }) == "v0.14.2"
+
+async def test_gitea_latest_release(get_version):
+    ver = await get_version("example", {
+        "source": "gitea",
+        "host": "codeberg.org",
+        "gitea": "ciberandy/qiv",
+        "use_latest_release": True,
+    })
+    assert ver.startswith('v3.'), ver
+
